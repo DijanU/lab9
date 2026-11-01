@@ -1,0 +1,11 @@
+CC3092_Laboratorio9_Series_de_Tiempo-1.pdf
+.venv/
+data/
+cache/
+cache_fast/
+lightning_logs/
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.DS_Store
+run*.log
