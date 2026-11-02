@@ -1,0 +1,154 @@
+{
+ "clientes_filtrados": 314,
+ "clientes_usados": 100,
+ "horas_por_serie": 26304,
+ "obs_panel_completo": 8259456,
+ "obs_panel_usado": 2630400,
+ "ventanas": {
+  "ventanas por serie": {
+   "train": 21697,
+   "val": 2185,
+   "test": 2185
+  },
+  "panel usado (100)": {
+   "train": 2169700,
+   "val": 218500,
+   "test": 218500
+  },
+  "panel completo (314)": {
+   "train": 6812858,
+   "val": 686090,
+   "test": 686090
+  }
+ },
+ "escalas": {
+  "m\u00ednimo": 20.865468978881836,
+  "mediana": 159.50364685058594,
+  "m\u00e1ximo": 11479.7177734375,
+  "max/min": 550.1777954101562
+ },
+ "escalas_completo": {
+  "m\u00ednimo": 4.330418109893799,
+  "mediana": 148.33702087402344,
+  "m\u00e1ximo": 48818.16015625
+ },
+ "dst": [
+  {
+   "d\u00eda": "2012-03-25",
+   "tipo": "marzo",
+   "kWh del panel en 01:00\u201301:45 antes": 4286,
+   "despu\u00e9s": 123709
+  },
+  {
+   "d\u00eda": "2012-10-28",
+   "tipo": "octubre",
+   "kWh del panel en 01:00\u201301:45 antes": 238115,
+   "despu\u00e9s": 119057
+  },
+  {
+   "d\u00eda": "2013-03-31",
+   "tipo": "marzo",
+   "kWh del panel en 01:00\u201301:45 antes": 4330,
+   "despu\u00e9s": 119662
+  },
+  {
+   "d\u00eda": "2013-10-27",
+   "tipo": "octubre",
+   "kWh del panel en 01:00\u201301:45 antes": 224029,
+   "despu\u00e9s": 112014
+  },
+  {
+   "d\u00eda": "2014-03-30",
+   "tipo": "marzo",
+   "kWh del panel en 01:00\u201301:45 antes": 418,
+   "despu\u00e9s": 113047
+  },
+  {
+   "d\u00eda": "2014-10-26",
+   "tipo": "octubre",
+   "kWh del panel en 01:00\u201301:45 antes": 233706,
+   "despu\u00e9s": 116853
+  }
+ ],
+ "navidad": [
+  {
+   "d\u00eda": "2012-12-24",
+   "cambio % vs. mismo d\u00eda de semana": "-5.7"
+  },
+  {
+   "d\u00eda": "2012-12-25",
+   "cambio % vs. mismo d\u00eda de semana": "-34.0"
+  },
+  {
+   "d\u00eda": "2012-12-31",
+   "cambio % vs. mismo d\u00eda de semana": "-7.0"
+  },
+  {
+   "d\u00eda": "2013-01-01",
+   "cambio % vs. mismo d\u00eda de semana": "-35.3"
+  },
+  {
+   "d\u00eda": "2013-12-24",
+   "cambio % vs. mismo d\u00eda de semana": "-4.3"
+  },
+  {
+   "d\u00eda": "2013-12-25",
+   "cambio % vs. mismo d\u00eda de semana": "-35.0"
+  },
+  {
+   "d\u00eda": "2013-12-31",
+   "cambio % vs. mismo d\u00eda de semana": "-3.2"
+  },
+  {
+   "d\u00eda": "2014-01-01",
+   "cambio % vs. mismo d\u00eda de semana": "-33.2"
+  },
+  {
+   "d\u00eda": "2014-12-24",
+   "cambio % vs. mismo d\u00eda de semana": "-2.8"
+  },
+  {
+   "d\u00eda": "2014-12-25",
+   "cambio % vs. mismo d\u00eda de semana": "-53.8"
+  },
+  {
+   "d\u00eda": "2014-12-31",
+   "cambio % vs. mismo d\u00eda de semana": "-8.4"
+  }
+ ],
+ "dow_rel": {
+  "lun": 0.9959999918937683,
+  "mar": 1.00600004196167,
+  "mi\u00e9": 1.0019999742507935,
+  "jue": 1.003999948501587,
+  "vie": 1.0219999551773071,
+  "s\u00e1b": 1.00600004196167,
+  "dom": 0.9649999737739563
+ },
+ "best_L": 336,
+ "norm_best": "window",
+ "best_lstm": "lstm_mo_L336_window_h256",
+ "own_best": {
+  "MLP": "mlp_L168",
+  "DLinear": "dlinear_L336",
+  "NLinear": "nlinear_L336",
+  "TCN": "tcn_L336",
+  "LSTM-MO": "lstm_mo_L336_window_h256",
+  "LSTM-AR": "lstm_ar_best",
+  "Seq2seq": "seq2seq_best"
+ },
+ "best_own": "DLinear",
+ "best_dl": "iTransformer",
+ "best_base": "MSTL",
+ "seed_mase": [
+  0.7917394042015076,
+  0.7843199372291565,
+  0.7784907221794128
+ ],
+ "local_mean": {
+  "MASE local": 0.8958539962768555,
+  "MASE global": 0.8946779131889343
+ },
+ "hardware": "Apple M5 Pro (MPS)",
+ "device": "mps"
+}

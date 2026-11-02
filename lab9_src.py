@@ -11,7 +11,9 @@
 # 3. `Dataset` de ventanas deslizantes y auditoría de fugas.
 # 4. Protocolo: función `backtest(modelo)` y métricas.
 # 5. Modelos: baselines (StatsForecast), LightGBM, implementaciones propias (MLP, DLinear, NLinear,
-#    LSTM, seq2seq), NeuralForecast (N-HiTS, TCN, PatchTST, iTransformer, DeepAR) y Chronos-Bolt.
+#    TCN, LSTM, seq2seq), NeuralForecast (N-HiTS, PatchTST, iTransformer, DeepAR) y Chronos-Bolt.
+#    La TCN de NeuralForecast divergía con los orígenes apilados como series (MASE de validación 22.5),
+#    así que se usa una TCN propia con convoluciones causales dilatadas.
 # 6. Iteraciones de hiperparámetros, estrategias multi-paso, local contra global, reentrenamiento y semillas.
 # 7. Comparación final y pronósticos de prueba.
 #
@@ -20,14 +22,14 @@
 # Cada experimento guarda su resultado en `cache/`; si el notebook se vuelve a ejecutar, se reutiliza.
 
 # %%
-import os, time, json, pickle, math, warnings, logging, threading, urllib.request, zipfile
+import os, gc, time, json, pickle, math, warnings, logging, threading, urllib.request, zipfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 import lightgbm as lgb      # en macOS debe usar el mismo libomp que torch (ver README)
 import numpy as np
 import pandas as pd
-import matplotlib, matplotlib.dates
+import matplotlib, matplotlib.dates, matplotlib.ticker
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -46,7 +48,7 @@ N_CLIENTS = 20 if FAST else 100                     # subconjunto permitido por 
 H = 24
 DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 N_CPU = os.cpu_count()
-CPU_THREADS = max(1, N_CPU - 4)                     # hilos para el trabajo de CPU en paralelo con la GPU
+CPU_THREADS = max(1, N_CPU // 2)                    # hilos para el trabajo de CPU en paralelo con la GPU
 HARDWARE_GPU = "Apple M5 Pro (MPS)"
 HARDWARE_CPU = f"Apple M5 Pro (CPU, {CPU_THREADS} hilos)"
 
@@ -696,6 +698,23 @@ class NLinearCore(nn.Module):
         y = x[..., 0]; last = y[:, -1:]
         return self.lin(y - last) + last
 
+class TCNCore(nn.Module):
+    """Convoluciones causales dilatadas (kernel 2, dilataciones 1…128 → campo receptivo 256 h) con residuales;
+    el último estado y el calendario futuro pasan a una cabeza lineal que emite los H pasos."""
+    def __init__(self, L, H, hidden=64, dropout=0.1, kernel=2, dilations=(1, 2, 4, 8, 16, 32, 64, 128), **_):
+        super().__init__(); self.k, self.dil = kernel, dilations
+        self.convs = nn.ModuleList([nn.Conv1d(1 + N_COV if i == 0 else hidden, hidden, kernel, dilation=d)
+                                    for i, d in enumerate(dilations)])
+        self.inp = nn.Conv1d(1 + N_COV, hidden, 1)       # residual del primer bloque (cambia de canales)
+        self.drop = nn.Dropout(dropout)
+        self.head = nn.Sequential(nn.Linear(hidden + H * N_COV, hidden), nn.ReLU(), nn.Linear(hidden, H))
+    def forward(self, x, fut, *_):
+        z = x.transpose(1, 2)                            # (B, canales, L)
+        for i, (conv, d) in enumerate(zip(self.convs, self.dil)):
+            out = self.drop(F.relu(conv(F.pad(z, ((self.k - 1) * d, 0)))))   # padding solo a la izquierda: causal
+            z = out + (self.inp(z) if i == 0 else z)
+        return self.head(torch.cat([z[:, :, -1], fut.flatten(1)], 1))
+
 class LSTMMOCore(nn.Module):
     def __init__(self, L, H, hidden=128, layers=2, dropout=0.1, **_):
         super().__init__()
@@ -744,7 +763,7 @@ class Seq2SeqCore(nn.Module):
                 yprev = yk
         return torch.cat(outs, 1)
 
-CORES = {"mlp": MLPCore, "dlinear": DLinearCore, "nlinear": NLinearCore,
+CORES = {"mlp": MLPCore, "dlinear": DLinearCore, "nlinear": NLinearCore, "tcn": TCNCore,
          "lstm_mo": LSTMMOCore, "lstm_ar": LSTMARCore, "seq2seq": Seq2SeqCore}
 
 class Net(nn.Module):
@@ -765,7 +784,7 @@ class Net(nn.Module):
 # **Entrenamiento.** Se usa:
 #
 # - Adam con *clipping* de gradiente en 1.0;
-# - lotes muestreados al azar de todas las ventanas de entrenamiento (150 000 ventanas por epoch, máximo 30 epochs);
+# - lotes muestreados al azar de todas las ventanas de entrenamiento (80 000 ventanas por epoch, máximo 20 epochs; el mismo presupuesto para todas las iteraciones);
 # - pérdida = MASE del lote, en kWh dividido entre la escala de cada cliente;
 # - early stopping con paciencia 4 sobre la MASE de validación, conservando los mejores pesos.
 #
@@ -774,8 +793,8 @@ class Net(nn.Module):
 
 # %%
 BASE_CFG = dict(kind="lstm_mo", L=168, H=24, hidden=128, layers=2, dropout=0.1, norm="series",
-                lr=1e-3, bs=512, months=30, tf=0.5, max_epochs=3 if FAST else 30, patience=4,
-                spe=3000 if FAST else 150_000)
+                lr=1e-3, bs=512, months=30, tf=0.5, max_epochs=3 if FAST else 20, patience=4,
+                spe=3000 if FAST else 80_000)
 CAL_T = torch.tensor(CAL, device=DEVICE)
 SCALE_T = torch.tensor(MASE_SCALE, device=DEVICE)
 
@@ -787,10 +806,10 @@ def predict_net(net, Ys, a_t, b_t, cfg, origins, series=None):
     """Pronóstico (n_series, n_origins, H) en kWh para todos los orígenes, en lotes."""
     net.eval()
     ds = WindowDataset(Ys, CAL_T, origins - cfg["L"], cfg["L"], cfg["H"], series=series)
-    out = []
+    out, bs = [], 256 if cfg["kind"] in ("lstm_ar", "seq2seq") else 1024   # los recursivos guardan H estados
     with torch.no_grad():
-        for k in range(0, len(ds), 1024):
-            x, fut, _, i = ds.__getitems__(torch.arange(k, min(k + 1024, len(ds)), device=DEVICE))
+        for k in range(0, len(ds), bs):
+            x, fut, _, i = ds.__getitems__(torch.arange(k, min(k + bs, len(ds)), device=DEVICE))
             out.append(net(x, fut) * b_t[i, None] + a_t[i, None])
     n = len(ds.series)
     return torch.cat(out).reshape(n, len(origins), cfg["H"]).cpu().numpy()
@@ -800,7 +819,7 @@ class TorchModel(Forecaster):
         self.name, self.seed, self.series = name, seed, series
         self.cfg = {**BASE_CFG, **cfg}
         c = self.cfg
-        self.family = {"mlp": "MLP", "dlinear": "Lineal", "nlinear": "Lineal", "lstm_mo": "Recurrente",
+        self.family = {"mlp": "MLP", "dlinear": "Lineal", "nlinear": "Lineal", "tcn": "Convolucional", "lstm_mo": "Recurrente",
                        "lstm_ar": "Recurrente", "seq2seq": "Encoder–decoder"}[c["kind"]]
         self.L = c["L"]
         self.strategy = {"lstm_ar": "autorregresiva", "seq2seq": "encoder–decoder"}.get(c["kind"], "multi-salida")
@@ -808,6 +827,8 @@ class TorchModel(Forecaster):
 
     def fit(self, train_end=T_TR, val_end=T_VA, hist_start=None):
         c = self.cfg; set_seed(self.seed)
+        gc.collect()
+        if DEVICE.type == "mps": torch.mps.empty_cache()  # libera la memoria que dejaron los modelos anteriores
         hs = hist_start_idx(c["months"], train_end) if hist_start is None else hist_start
         a, b = norm_stats(Y_kwh, c["norm"], train_end, hs)
         self.a_t = torch.tensor(a, device=DEVICE, dtype=torch.float32)
@@ -923,7 +944,7 @@ def best_of(prefix_names):
     return min(prefix_names, key=lambda n: ITER[n]["val_MASE"])
 norm_best = ITER[best_of([f"lstm_mo_L{best_L}", f"lstm_mo_L{best_L}_global", f"lstm_mo_L{best_L}_window"])]["cfg"]["norm"]
 # Iteración 4: capacidad, regularización y optimización
-for nm, kw in {"h64": dict(hidden=64), "h256": dict(hidden=256), "capas1": dict(layers=1),
+for nm, kw in {"h256": dict(hidden=256), "capas1": dict(layers=1),
                "drop03": dict(dropout=0.3), "lr3e-3": dict(lr=3e-3), "bs1024": dict(bs=1024)}.items():
     run_iter(f"lstm_mo_L{best_L}_{norm_best}_{nm}", L=best_L, norm=norm_best, **kw)
 
@@ -934,6 +955,8 @@ for L in (168, 336):
     run_iter(f"dlinear_L{L}", kind="dlinear", L=L)
     run_iter(f"nlinear_L{L}", kind="nlinear", L=L)
 run_iter("dlinear_L336_window", kind="dlinear", L=336, norm="window")
+for L in (168, 336):                                     # TCN propia (64 canales, campo receptivo 256 h)
+    run_iter(f"tcn_L{L}", kind="tcn", L=L, hidden=64)
 for mo in (3, 12):
     run_iter(f"dlinear_L336_{mo}m", kind="dlinear", L=336, months=mo)
 
@@ -961,14 +984,15 @@ iter_df
 # %%
 curve_names = [f"lstm_mo_L{best_L}", f"lstm_mo_L{best_L}_global", f"lstm_mo_L{best_L}_{norm_best}_h256",
                f"lstm_mo_L{best_L}_{norm_best}_lr3e-3"]
-fig, axes = plt.subplots(1, len(curve_names), figsize=(13, 2.8), sharey=True)
-for ax, n in zip(axes, curve_names):
+fig, axes = plt.subplots(2, 2, figsize=(8, 5.2))       # sin eje y compartido: la normalización global escala distinto
+for ax, n in zip(axes.flat, curve_names):
     h = pd.DataFrame(ITER[n]["history"])
     ax.plot(h.epoch, h.train_loss, color=PAL[0], marker="o", ms=3, label="train")
     ax.plot(h.epoch, h.val_MASE, color=PAL[1], marker="o", ms=3, label="validación")
     ax.axvline(ITER[n]["best_epoch"], color=GRAY, lw=0.8, ls="--")
     ax.set(title=n.replace(f"lstm_mo_L{best_L}", "LSTM").replace("_", " ") or "LSTM base", xlabel="epoch")
-axes[0].set_ylabel("MASE"); axes[0].legend(frameon=False)
+for ax in axes[:, 0]: ax.set_ylabel("MASE")
+axes[0, 0].legend(frameon=False)
 fig.tight_layout(); fig.savefig(FIG / "curvas_perdida.png", dpi=150); plt.show()
 
 # %% [markdown]
@@ -998,7 +1022,7 @@ for kind in ("lstm_ar", "seq2seq"):
 
 # %%
 from neuralforecast import NeuralForecast
-from neuralforecast.models import NHITS, TCN, PatchTST, iTransformer, DeepAR
+from neuralforecast.models import NHITS, PatchTST, iTransformer, DeepAR
 from neuralforecast.losses.pytorch import MAE as NF_MAE, DistributionLoss
 
 NF_STEPS = 20 if FAST else 2000
@@ -1011,8 +1035,6 @@ def nf_common(L, seed=SEED, **over):
 
 NF_SPECS = {
     "NHITS": (lambda L, s: NHITS(futr_exog_list=CAL_COLS, loss=NF_MAE(), **nf_common(L, s)), "Residual (MLP jerárquico)", "sí (calendario)"),
-    "TCN": (lambda L, s: TCN(futr_exog_list=CAL_COLS, encoder_hidden_size=128, dilations=[1, 2, 4, 8, 16, 32],
-                             kernel_size=2, loss=NF_MAE(), **nf_common(L, s)), "Convolucional", "sí (calendario)"),
     "PatchTST": (lambda L, s: PatchTST(patch_len=24, stride=12, hidden_size=128, n_heads=8, encoder_layers=3,
                                        loss=NF_MAE(), **nf_common(L, s)), "Atención", "no"),
     "iTransformer": (lambda L, s: iTransformer(n_series=N_SER, hidden_size=128, n_heads=8, e_layers=2, d_ff=256,
@@ -1138,6 +1160,7 @@ OWN_BEST = {
     "MLP": best_of([n for n in ITER if n.startswith("mlp")]),
     "DLinear": best_of([n for n in ITER if n.startswith("dlinear") and not n.endswith("m")]),
     "NLinear": best_of([n for n in ITER if n.startswith("nlinear")]),
+    "TCN": best_of([n for n in ITER if n.startswith("tcn")]),
     "LSTM-MO": best_lstm, "LSTM-AR": "lstm_ar_best", "Seq2seq": "seq2seq_best",
 }
 for label, it_name in OWN_BEST.items():
@@ -1345,6 +1368,7 @@ for k, col in enumerate(["LightGBM", "DLinear", "LSTM", "PatchTST"]):
 ax.axhline(val_mase["SeasonalNaive24"], color=GRAY, ls="--", lw=1.2, label="SeasonalNaive24")
 ax.axhline(val_mase["Chronos-Bolt"], color=PAL[7], ls=":", lw=1.5, label="Chronos-Bolt (zero-shot)")
 ax.set_xscale("log"); ax.set_xticks([3, 12, 30]); ax.set_xticklabels(["3", "12", "30"])
+ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
 ax.set(xlabel="meses de historia de entrenamiento", ylabel="MASE de validación", title="Efecto de la cantidad de historia")
 ax.legend(frameon=False, fontsize=7); fig.tight_layout(); fig.savefig(FIG / "historia.png", dpi=150); plt.show()
 hist_tab.round(4)

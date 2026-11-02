@@ -1,0 +1,3 @@
+modelo,MASE una vez,MASE reentreno mensual,train s (3 reentrenos)
+iTransformer,0.7917,0.7902,637.6813
+MSTL,0.9279,0.9257,14.0109
